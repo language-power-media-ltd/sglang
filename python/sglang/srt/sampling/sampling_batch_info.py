@@ -154,6 +154,7 @@ class SamplingBatchInfo:
                 )
         else:
             penalizers = {
+                penaltylib.BatchedDRYPenalizer,
                 penaltylib.BatchedFrequencyPenalizer,
                 penaltylib.BatchedMinNewTokensPenalizer,
                 penaltylib.BatchedPresencePenalizer,

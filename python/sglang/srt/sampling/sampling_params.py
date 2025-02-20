@@ -49,6 +49,14 @@ class SamplingParams:
         ignore_eos: bool = False,
         skip_special_tokens: bool = True,
         custom_params: Optional[Dict[str, Any]] = None,
+        dry_multiplier: float = 0.0,
+        dry_base: float = 1.75,
+        dry_allowed_length: int = 2,
+        dry_sequence_breaker_ids: List[int] = [],
+        dry_range: int = 0,
+        dry_max_ngram: int = 12,
+        dry_max_occurrences: int = 8,
+        dry_early_exit_match_len: int = 8
     ) -> None:
         self.temperature = temperature
         self.top_p = top_p
@@ -73,6 +81,14 @@ class SamplingParams:
         self.ebnf = ebnf
         self.no_stop_trim = no_stop_trim
         self.custom_params = custom_params
+        self.dry_multiplier = dry_multiplier
+        self.dry_base = dry_base
+        self.dry_allowed_length = dry_allowed_length
+        self.dry_range = dry_range
+        self.dry_max_ngram = dry_max_ngram
+        self.dry_max_occurrences = dry_max_occurrences
+        self.dry_early_exit_match_len = dry_early_exit_match_len
+        self.dry_sequence_breakers = dry_sequence_breakers
 
         # Process some special cases
         if self.temperature < _SAMPLING_EPS:
@@ -123,6 +139,34 @@ class SamplingParams:
                     f"min_new_tokens must be in (0, max_new_tokens({self.max_new_tokens})], got "
                     f"{self.min_new_tokens}."
                 )
+        if self.dry_multiplier < 0.0:
+            raise ValueError(
+                "dry_multiplier must be non-negative, got "
+                f"{self.dry_multiplier}.")
+        if self.dry_base <= 1.0:
+            raise ValueError(
+                "dry_base must be greater than 1, got "
+                f"{self.dry_base}.")
+        if self.dry_allowed_length < 0:
+            raise ValueError(
+                "dry_allowed_length must be non-negative, got "
+                f"{self.dry_allowed_length}.")
+        if self.dry_range < 0:
+            raise ValueError(
+                "dry_range must be non-negative, got "
+                f"{self.dry_range}.")
+        if self.dry_max_ngram < 0:
+            raise ValueError(
+                "dry_max_ngram must be non-negative, got "
+                f"{self.dry_max_ngram}.")
+        if self.dry_max_occurrences < 0:
+            raise ValueError(
+                "dry_max_occurrences must be non-negative, got "
+                f"{self.dry_max_occurrences}.")
+        if self.dry_early_exit_match_len < 0:
+            raise ValueError(
+                "dry_early_exit_match_len must be non-negative, got "
+                f"{self.dry_early_exit_match_len}.")
         grammars = [
             self.json_schema,
             self.regex,

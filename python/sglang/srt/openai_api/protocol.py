@@ -181,6 +181,14 @@ class CompletionRequest(BaseModel):
     skip_special_tokens: bool = True
     lora_path: Optional[Union[List[Optional[str]], Optional[str]]] = None
     session_params: Optional[Dict] = None
+    dry_multiplier: float = 0.0
+    dry_base: float = 1.75
+    dry_allowed_length: int = 2
+    dry_sequence_breaker_ids: List[int] = []
+    dry_range: int = 0
+    dry_max_ngram: int = 12
+    dry_max_occurrences: int = 8
+    dry_early_exit_match_len: int = 8
 
 
 class CompletionResponseChoice(BaseModel):
@@ -324,6 +332,14 @@ class ChatCompletionRequest(BaseModel):
     skip_special_tokens: bool = True
     lora_path: Optional[Union[List[Optional[str]], Optional[str]]] = None
     session_params: Optional[Dict] = None
+    dry_multiplier: float = 0.0
+    dry_base: float = 1.75
+    dry_allowed_length: int = 2
+    dry_sequence_breaker_ids: List[int] = []
+    dry_range: int = 0
+    dry_max_ngram: int = 12
+    dry_max_occurrences: int = 8
+    dry_early_exit_match_len: int = 8
 
 
 class FunctionResponse(BaseModel):

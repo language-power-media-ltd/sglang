@@ -540,6 +540,14 @@ def v1_generate_request(
                 "no_stop_trim": request.no_stop_trim,
                 "ignore_eos": request.ignore_eos,
                 "skip_special_tokens": request.skip_special_tokens,
+                "dry_multiplier": dry_multiplier,
+                "dry_base": dry_base,
+                "dry_allowed_length": dry_allowed_length,
+                "dry_range": dry_range,
+                "dry_max_ngram": dry_max_ngram,
+                "dry_max_occurrences": dry_max_occurrences,
+                "dry_early_exit_match_len": dry_early_exit_match_len,
+                "dry_sequence_breakers": dry_sequence_breakers,
             }
         )
         return_logprobs.append(request.logprobs is not None)
@@ -987,6 +995,14 @@ def v1_chat_generate_request(
             "no_stop_trim": request.no_stop_trim,
             "ignore_eos": request.ignore_eos,
             "skip_special_tokens": request.skip_special_tokens,
+            "dry_multiplier": request.dry_multiplier,
+            "dry_base": request.dry_base,
+            "dry_allowed_length": request.dry_allowed_length,
+            "dry_range": request.dry_range,
+            "dry_max_ngram": request.dry_max_ngram,
+            "dry_max_occurrences": request.dry_max_occurrences,
+            "dry_early_exit_match_len": request.dry_early_exit_match_len,
+            "dry_sequence_breakers": request.dry_sequence_breakers,
         }
         if request.response_format and request.response_format.type == "json_schema":
             sampling_params["json_schema"] = convert_json_schema_to_str(

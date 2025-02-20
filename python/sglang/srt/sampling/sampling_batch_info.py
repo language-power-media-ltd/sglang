@@ -139,6 +139,7 @@ class SamplingBatchInfo:
             # It requires correcly updating the penalty logits before the sampling and syncing the events.
             # We will support them later.
             penalizers = {
+                penaltylib.BatchedDRYPenalizer,
                 penaltylib.BatchedMinNewTokensPenalizer,
             }
             if (

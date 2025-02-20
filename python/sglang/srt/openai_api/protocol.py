@@ -184,7 +184,7 @@ class CompletionRequest(BaseModel):
     dry_multiplier: float = 0.0
     dry_base: float = 1.75
     dry_allowed_length: int = 2
-    dry_sequence_breaker_ids: List[int] = []
+    dry_sequence_breakers: List[str] = []
     dry_range: int = 0
     dry_max_ngram: int = 12
     dry_max_occurrences: int = 8
@@ -335,7 +335,7 @@ class ChatCompletionRequest(BaseModel):
     dry_multiplier: float = 0.0
     dry_base: float = 1.75
     dry_allowed_length: int = 2
-    dry_sequence_breaker_ids: List[int] = []
+    dry_sequence_breakers: List[str] = []
     dry_range: int = 0
     dry_max_ngram: int = 12
     dry_max_occurrences: int = 8

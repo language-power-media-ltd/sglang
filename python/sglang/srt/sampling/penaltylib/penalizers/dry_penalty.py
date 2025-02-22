@@ -7,58 +7,56 @@ from sglang.srt.sampling.penaltylib.orchestrator import _BatchedPenalizer, _Toke
 class BatchedDRYPenalizer(_BatchedPenalizer):
     """
     使用 Don't Repeat Yourself (DRY) 采样惩罚，防止输出中出现“循环”。
-    
+
     惩罚计算公式为：
-    
+
         penalty = dry_multiplier * dry_base^(n - dry_allowed_length)
-    
+
     其中 n 表示当前 token 前与历史末尾匹配的连续 token 个数，
     当 n 小于 dry_allowed_length 时不惩罚。
-    
+
     参数均通过 req.sampling_params 中对应的 dry_* 字段传入。
     """
     
     def __init__(self, orchestrator):
         super().__init__(orchestrator)
-        # 保存输入和输出令牌序列（每个 batch 元素皆为一个 1D torch.Tensor）
-        self.input_token_ids: List[torch.Tensor] = None
-        self.output_token_ids: List[torch.Tensor] = None
+        # 保存输入和输出令牌序列（每个 batch 元素皆为 1D torch.Tensor）
+        self.input_token_ids: List[torch.Tensor] = None       # 初始 prompt tokens
+        self.output_token_ids: List[torch.Tensor] = None      # 当前生成的最新 output tokens
+        self.cumulated_output_token_ids: List[torch.Tensor] = None  # 已生成的累计 output tokens
+        self.cached_input_prompt: List[torch.Tensor] = None   # 缓存处理过的 prompt tokens（不会改变）
 
-        # DRY 参数张量，均为 batch 维：shape = (batch_size, ...) 
+        # DRY 参数（每个参数均为 batch 维张量）
         self.dry_multipliers: torch.Tensor = None         # float, shape (B, 1)
         self.dry_bases: torch.Tensor = None               # float, shape (B, 1)
-        self.dry_allowed_lengths: torch.Tensor = None       # int, shape (B,)
+        self.dry_allowed_lengths: torch.Tensor = None     # int, shape (B,)
         self.dry_ranges: torch.Tensor = None              # int, shape (B,)
         self.dry_max_ngram: torch.Tensor = None           # int, shape (B,)
         self.dry_max_occurrences: torch.Tensor = None     # int, shape (B,)
         self.dry_early_exit_match_len: torch.Tensor = None  # int, shape (B,)
-        # 每个 batch 对应的序列中断 token（列表形式），如果 token 出现在末尾，则不惩罚
+        # 每个 batch 对应的序列中断 token（列表形式），在末尾出现时不惩罚
         self.dry_sequence_breakers: List[List[int]] = None
 
     def _is_required(self) -> bool:
-        # 当存在一个生成请求的 dry_multiplier 不为 0 时，启用 DRY 惩罚
-        return any(
-            req.sampling_params.dry_multiplier != 0.0
-            for req in self.orchestrator.reqs()
-        )
+        # 当存在至少一个请求的 dry_multiplier 不为 0 时启用 DRY 惩罚
+        reqs = self.orchestrator.reqs()
+        return any(req.sampling_params.dry_multiplier != 0.0 for req in reqs)
 
     def _prepare(self):
-        for req in self.orchestrator.reqs():
-            print(req.sampling_params.dry_allowed_length)
-            for prompt in req.sampling_params.dry_sequence_breakers:
-                print(req.tokenizer.encode(prompt, add_special_tokens=False))
-        # 提取每个请求的 DRY 参数
-        dry_multipliers = [req.sampling_params.dry_multiplier for req in self.orchestrator.reqs()]
-        dry_bases = [req.sampling_params.dry_base for req in self.orchestrator.reqs()]
-        dry_allowed_lengths = [req.sampling_params.dry_allowed_length for req in self.orchestrator.reqs()]
-        dry_ranges = [req.sampling_params.dry_range for req in self.orchestrator.reqs()]
-        dry_max_ngram = [req.sampling_params.dry_max_ngram for req in self.orchestrator.reqs()]
-        dry_max_occurrences = [req.sampling_params.dry_max_occurrences for req in self.orchestrator.reqs()]
-        dry_early_exit_match_len = [req.sampling_params.dry_early_exit_match_len for req in self.orchestrator.reqs()]
+        # 避免多次调用 self.orchestrator.reqs()，提前存入局部变量
+        reqs = list(self.orchestrator.reqs())
+
+        dry_multipliers = [req.sampling_params.dry_multiplier for req in reqs]
+        dry_bases = [req.sampling_params.dry_base for req in reqs]
+        dry_allowed_lengths = [req.sampling_params.dry_allowed_length for req in reqs]
+        dry_ranges = [req.sampling_params.dry_range for req in reqs]
+        dry_max_ngram = [req.sampling_params.dry_max_ngram for req in reqs]
+        dry_max_occurrences = [req.sampling_params.dry_max_occurrences for req in reqs]
+        dry_early_exit_match_len = [req.sampling_params.dry_early_exit_match_len for req in reqs]
         dry_sequence_breakers  = [
             [req.tokenizer.encode(prompt, add_special_tokens=False)[-1] 
-            for prompt in req.sampling_params.dry_sequence_breakers]
-            for req in self.orchestrator.reqs()
+             for prompt in req.sampling_params.dry_sequence_breakers]
+            for req in reqs
         ]
 
         device = self.orchestrator.device
@@ -82,138 +80,125 @@ class BatchedDRYPenalizer(_BatchedPenalizer):
         self.dry_sequence_breakers = None
         self.input_token_ids = None
         self.output_token_ids = None
+        self.cumulated_output_token_ids = None
+        self.cached_input_prompt = None
 
     def _cumulate_input_tokens(self, input_ids: _TokenIDs):
-        # 假设 input_ids.token_ids 是一个列表，每个元素为对应 batch 的 1D tensor
-        self.input_token_ids = input_ids.token_ids
+        # 过滤掉特殊 token（假设 tokenizer 有属性 bos_token_id 和 eos_token_id）
+        req = self.orchestrator.reqs()[0]
+        bos_id = req.tokenizer.bos_token_id
+        eos_id = req.tokenizer.eos_token_id
+
+        self.input_token_ids = []
+        self.cached_input_prompt = []
+        for tokens in input_ids.token_ids:
+            # 利用布尔索引比逐个过滤更高效
+            filtered = tokens[(tokens != bos_id) & (tokens != eos_id)]
+            self.input_token_ids.append(filtered)
+            self.cached_input_prompt.append(filtered)  # 缓存 prompt tokens，不用重复调用
 
     def _cumulate_output_tokens(self, output_ids: _TokenIDs):
-        # 如果 output_ids.token_ids 已经是列表，就直接存储；否则拆分为列表（每个 batch 一行）
+        # 如果 output_ids.token_ids 本身已经是列表就直接使用，否则分 batch 处理
         if isinstance(output_ids.token_ids, list):
             new_output_tokens = output_ids.token_ids
         else:
             new_output_tokens = [output_ids.token_ids[i] for i in range(output_ids.token_ids.size(0))]
         
-        # 保存新生成的输出 token
-        self.output_token_ids = new_output_tokens
-
-        # 将新的输出 token 追加到现有的 input token 序列中
-        if self.input_token_ids is not None:
-            for i in range(len(new_output_tokens)):
-                # 保证 self.input_token_ids[i] 至少为 1D tensor
-                if self.input_token_ids[i].dim() == 0:
-                    self.input_token_ids[i] = self.input_token_ids[i].unsqueeze(0)
-                # 保证 new_output_tokens[i] 也是 1D tensor
-                if new_output_tokens[i].dim() == 0:
-                    new_output_tokens[i] = new_output_tokens[i].unsqueeze(0)
-                self.input_token_ids[i] = torch.cat([self.input_token_ids[i], new_output_tokens[i]])
+        if self.cumulated_output_token_ids is None:
+            self.cumulated_output_token_ids = new_output_tokens
         else:
-            self.input_token_ids = new_output_tokens
+            for i in range(len(new_output_tokens)):
+                out_tok = new_output_tokens[i]
+                if self.cumulated_output_token_ids[i].dim() == 0:
+                    self.cumulated_output_token_ids[i] = self.cumulated_output_token_ids[i].unsqueeze(0)
+                if out_tok.dim() == 0:
+                    out_tok = out_tok.unsqueeze(0)
+                self.cumulated_output_token_ids[i] = torch.cat(
+                    [self.cumulated_output_token_ids[i], out_tok]
+                )
+        self.output_token_ids = new_output_tokens
 
     def _apply(self, logits: torch.Tensor) -> torch.Tensor:
         batch_size = logits.size(0)
-        vocab_size = self.orchestrator.vocab_size
+        vocab_size = logits.size(-1)
+        device = logits.device
 
         for i in range(batch_size):
-            # 处理输入 token 序列
-            if self.input_token_ids is not None:
-                input_seq = self.input_token_ids[i]
-                if input_seq.dim() == 0:
-                    input_seq = input_seq.unsqueeze(0)
-                prompt_len = input_seq.size(0) - (input_seq == vocab_size).sum().item()
+            # 使用缓存的输入 prompt
+            input_seq = self.cached_input_prompt[i] if self.cached_input_prompt is not None else torch.empty(0, dtype=torch.int64, device=device)
+            if self.cumulated_output_token_ids is not None and i < len(self.cumulated_output_token_ids):
+                output_seq = self.cumulated_output_token_ids[i]
             else:
-                prompt_len = 0
-            print("输入"+str(prompt_len))
-            # 处理输出 token 序列
-            if self.output_token_ids is not None and i < len(self.output_token_ids):
-                output_seq = self.output_token_ids[i]
-                if output_seq.dim() == 0:
-                    output_seq = output_seq.unsqueeze(0)
-                output_len = output_seq.size(0) - (output_seq == vocab_size).sum().item()
-            else:
-                output_len = 0
-            print("输入"+str(output_len))
-            # 获取实际的 token 序列（排除填充部分）
-            seq_prompt = input_seq[:prompt_len] if prompt_len > 0 else torch.tensor([], dtype=torch.int64, device=logits.device)
-            seq_output = output_seq[:output_len] if output_len > 0 else torch.tensor([], dtype=torch.int64, device=logits.device)
-            # 拼接完整的 token 序列
-            if seq_prompt.numel() > 0 and seq_output.numel() > 0:
-                token_seq = torch.cat((seq_prompt, seq_output), dim=0)
-            elif seq_prompt.numel() > 0:
-                token_seq = seq_prompt
-            elif seq_output.numel() > 0:
-                token_seq = seq_output
-            else:
-                print("结束1")
-                continue
-            print("总共"+str(token_seq))
-            # 以下逻辑保持不变……
-            # 仅考虑最近 dry_range 个 token
-            range_limit = self.dry_ranges[i].item()
-            if range_limit > 0 and token_seq.size(0) > range_limit:
-                token_seq = token_seq[-range_limit:]
+                output_seq = torch.empty(0, dtype=torch.int64, device=device)
+            if output_seq.numel() > 0 and output_seq.dim() == 0:
+                output_seq = output_seq.unsqueeze(0)
+            # 如果存在填充 token（比如值为 vocab_size）则去除
+            prompt_len = input_seq.size(0) - (input_seq == vocab_size).sum().item() if input_seq.numel() > 0 else 0
+            output_len = output_seq.size(0) - (output_seq == vocab_size).sum().item() if output_seq.numel() > 0 else 0
 
-            if token_seq.size(0) < 2:
-                print("结束2")
+            seq_prompt = input_seq[:prompt_len] if prompt_len > 0 else torch.empty(0, dtype=torch.int64, device=device)
+            seq_output = output_seq[:output_len] if output_len > 0 else torch.empty(0, dtype=torch.int64, device=device)
+            token_seq = torch.cat((seq_prompt, seq_output), dim=0) if (seq_prompt.numel() or seq_output.numel()) else torch.empty(0, dtype=torch.int64, device=device)
+            if token_seq.numel() < 2:
                 continue
 
             last_token = token_seq[-1].item()
             if last_token in self.dry_sequence_breakers[i]:
                 continue
 
-            break_mask = torch.zeros(token_seq.size(0), dtype=torch.bool, device=logits.device)
-            for breaker in self.dry_sequence_breakers[i]:
-                break_mask.logical_or_(token_seq == breaker)
+            # 利用 torch.isin 计算 break_mask，避免 for 循环
+            breaker_tensor = torch.tensor(self.dry_sequence_breakers[i], device=device)
+            break_mask = torch.isin(token_seq, breaker_tensor)
 
-            max_ngram_val = self.dry_max_ngram[i].item()
+            # 提前取出 DRY 参数，避免多次 .item() 调用
+            max_ngram_val = int(self.dry_max_ngram[i].item())
+            min_ngram = int(self.dry_allowed_lengths[i].item())
+            max_occ_val = int(self.dry_max_occurrences[i].item())
+            early_exit_match_len_val = int(self.dry_early_exit_match_len[i].item())
+            
+            seq_length = token_seq.size(0)
             curr_max_ngram = 0
-            for curr_max_ngram in range(min(len(break_mask), max_ngram_val + 1)):
-                if break_mask[-curr_max_ngram - 1]:
+            for n in range(min(seq_length, max_ngram_val + 1)):
+                if break_mask[seq_length - n - 1]:
                     break
+                curr_max_ngram = n + 1
 
-            min_ngram = self.dry_allowed_lengths[i].item()
             if curr_max_ngram <= min_ngram:
-                print("结束3")
                 continue
 
-            ngram_lens = torch.zeros(vocab_size, dtype=torch.int32, device=logits.device)
-            endpoints_all = torch.nonzero(token_seq == last_token, as_tuple=True)[0].tolist()
+            ngram_lens = torch.zeros(vocab_size, dtype=torch.int32, device=device)
+            endpoints_all = (token_seq == last_token).nonzero(as_tuple=False).flatten().tolist()
             if len(endpoints_all) < 2:
-                print("结束4")
                 continue
             endpoint_indexes = endpoints_all[:-1]
-            max_occ_val = self.dry_max_occurrences[i].item()
             if len(endpoint_indexes) > max_occ_val:
                 endpoint_indexes = endpoint_indexes[-max_occ_val:]
-            early_exit_match_len_val = self.dry_early_exit_match_len[i].item()
 
+            # 内层循环判断 n-gram 匹配长度
             for idx in reversed(endpoint_indexes):
                 if idx == token_seq.size(0) - 1:
-                    print("结束5")
                     continue
-
                 match_len = 0
                 limit = min(idx, curr_max_ngram)
                 for unwind in range(1, limit + 1):
                     if break_mask[idx - unwind]:
-                        print("结束6")
                         break
-                    if token_seq[idx - unwind] != token_seq[-unwind - 1]:
-                        print("结束7")
+                    # 注意：由于 token_seq 是 1D 张量，建议使用 .item() 提取标量比较
+                    if token_seq[idx - unwind].item() != token_seq[-unwind - 1].item():
                         break
                     match_len = unwind
-
                 if match_len > 0:
                     next_tok = token_seq[idx + 1].item()
                     new_len = match_len + 1
-                    ngram_lens[next_tok] = max(ngram_lens[next_tok].item(), new_len)
+                    # 保证保留最大匹配长度
+                    ngram_lens[next_tok] = max(int(ngram_lens[next_tok].item()), new_len)
                     if new_len >= early_exit_match_len_val:
-                        print("结束8")
                         break
 
             penalty_mask = ngram_lens > 0
             if penalty_mask.any():
-                scales = self.dry_bases[i].item() ** (ngram_lens[penalty_mask] - min_ngram)
+                # 注意：这里先转换为浮点数做幂运算
+                scales = self.dry_bases[i].item() ** (ngram_lens[penalty_mask].to(torch.float32) - min_ngram)
                 logits[i][penalty_mask] -= self.dry_multipliers[i].item() * scales
 
         return logits
@@ -229,12 +214,15 @@ class BatchedDRYPenalizer(_BatchedPenalizer):
         self.dry_sequence_breakers = [self.dry_sequence_breakers[i] for i in indices_to_keep]
         if self.input_token_ids is not None:
             self.input_token_ids = [self.input_token_ids[i] for i in indices_to_keep]
+            self.cached_input_prompt = [self.cached_input_prompt[i] for i in indices_to_keep]
         if self.output_token_ids is not None:
             self.output_token_ids = [self.output_token_ids[i] for i in indices_to_keep]
+        if self.cumulated_output_token_ids is not None:
+            self.cumulated_output_token_ids = [self.cumulated_output_token_ids[i] for i in indices_to_keep]
 
     def _merge(self, their: "BatchedDRYPenalizer"):
-        # 合并其他 orchestrator 中 DRY 惩罚器的状态
-        other = their  # 假设 other 也是 BatchedDRYPenalizer
+        # 合并其他 orchestrator 中 DRY 惩罚器的状态（假设 other 也是 BatchedDRYPenalizer）
+        other = their
         self.dry_multipliers = torch.cat([self.dry_multipliers, other.dry_multipliers], dim=0)
         self.dry_bases = torch.cat([self.dry_bases, other.dry_bases], dim=0)
         self.dry_allowed_lengths = torch.cat([self.dry_allowed_lengths, other.dry_allowed_lengths], dim=0)
@@ -242,12 +230,3 @@ class BatchedDRYPenalizer(_BatchedPenalizer):
         self.dry_max_ngram = torch.cat([self.dry_max_ngram, other.dry_max_ngram], dim=0)
         self.dry_max_occurrences = torch.cat([self.dry_max_occurrences, other.dry_max_occurrences], dim=0)
         self.dry_early_exit_match_len = torch.cat([self.dry_early_exit_match_len, other.dry_early_exit_match_len], dim=0)
-        self.dry_sequence_breakers = self.dry_sequence_breakers + other.dry_sequence_breakers
-        if self.input_token_ids is None:
-            self.input_token_ids = other.input_token_ids
-        else:
-            self.input_token_ids.extend(other.input_token_ids)
-        if self.output_token_ids is None:
-            self.output_token_ids = other.output_token_ids
-        else:
-            self.output_token_ids.extend(other.output_token_ids)

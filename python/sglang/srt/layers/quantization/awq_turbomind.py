@@ -1,12 +1,15 @@
 import logging
 import os
 import sys
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import torch
-from sgl_kernel import turbomindLinear
+import turbomind
 from torch.nn import Parameter
+
+turbomind_dir = os.path.split(turbomind.__file__)[0]
+sys.path.append(os.path.join(turbomind_dir, "lib"))
+import _turbomind_ext
 from vllm.model_executor.layers.linear import LinearBase
 
 from sglang.srt.layers.linear import LinearMethodBase, UnquantizedLinearMethod
@@ -245,7 +248,7 @@ class AWQTurbomindLinearMethod(LinearMethodBase):
         scales_turbomind = scales_turbomind.contiguous()
         qzeros_turbomind = qzeros_turbomind.contiguous()
 
-        self.linear = turbomindLinear(
+        self.linear = _turbomind_ext.Linear(
             layer.input_size_per_partition,
             layer.output_size_per_partition,
             self.quant_config.weight_bits,
